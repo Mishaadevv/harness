@@ -35,7 +35,7 @@ jobs:
         run: npm ci
 
       - name: Build distributables
-        run: npm run dist -- --publish never
+        run: npx electron-builder --publish never
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
