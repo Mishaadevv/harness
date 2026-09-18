@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+
+# Codebuff/Freebuff metadata
+.freebuff/
+
+# Logs
+*.log
+
+# OS
+.DS_Store

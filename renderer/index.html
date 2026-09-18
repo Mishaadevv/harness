@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Zeqou Harness</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https: http:; font-src 'self' data:" />
+<link rel="icon" type="image/png" href="../ico.png" />
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+<div id="app" class="app">
+  <!-- Sidebar: quiet navigation -->
+  <aside id="sidebar" class="sidebar">
+    <div class="brand">
+      <img src="../ico.png" alt="Zeqou" class="brand-mark" />
+      <div class="brand-text">
+        <span class="brand-zeqou">ZEQOU</span>
+        <span class="brand-product">Harness</span>
+      </div>
+      <button class="icon-btn" id="btnCollapse" title="Toggle sidebar" aria-label="Toggle sidebar">
+        <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12.5 4.5 7 10l5.5 5.5"/></svg>
+      </button>
+    </div>
+    <button class="new-chat" id="btnNewChat">
+      <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M10 4.5v11M4.5 10h11"/></svg>
+      <span>New chat</span>
+    </button>
+    <nav class="nav" id="mainNav" aria-label="Primary">
+      <button class="nav-item" data-view="chat">
+        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3.5 5.5h13v8h-7l-3.5 3v-3H3.5v-8Z" stroke-linejoin="round"/></svg>
+        <span>Chats</span>
+      </button>
+      <button class="nav-item" data-view="history">
+        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3.5 10a6.5 6.5 0 1 1 2 4.7M3.5 10H2m1.5 0V8.5M10 6.5V10l2.5 2.5"/></svg>
+        <span>History</span>
+      </button>
+      <div class="nav-label">Workspace</div>
+      <button class="nav-item" data-view="projects">
+        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3.5 6.5h5l1.5 2h6.5v6h-13v-8Z" stroke-linejoin="round"/></svg>
+        <span>Projects</span>
+      </button>
+      <button class="nav-item" data-view="files">
+        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 3.5h5.5L14 7v9.5H5v-13Z M10 3.5V7H14" stroke-linejoin="round"/></svg>
+        <span>Files</span>
+      </button>
+      <div class="nav-label">AI</div>
+      <button class="nav-item" data-view="models">
+        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10 2.8 16.5 6.2v7.6L10 17.2 3.5 13.8V6.2L10 2.8Z M10 2.8V10m0 0 6.5-3.8M10 10 3.5 6.2" stroke-linejoin="round"/></svg>
+        <span>Models</span>
+      </button>
+      <button class="nav-item" data-view="memories">
+        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="10" cy="10" r="6.5"/><circle cx="10" cy="10" r="2.5"/></svg>
+        <span>Memory</span>
+      </button>
+      <button class="nav-item" data-view="tools">
+        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="10" cy="10" r="2.2"/><path d="M10 2.5v3M10 14.5v3M2.5 10h3M14.5 10h3M4.8 4.8l2.1 2.1M13.1 13.1l2.1 2.1M15.2 4.8l-2.1 2.1M6.9 13.1l-2.1 2.1"/></svg>
+        <span>Tools</span>
+      </button>
+      <button class="nav-item" data-view="mcp">
+        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="11" y="11" width="6" height="6" rx="1.5"/><path d="M9 6.5h4.5V11M11 13.5H6.5V9"/></svg>
+        <span>MCP</span><span class="nav-dot" id="dotMcp"></span>
+      </button>
+    </nav>
+    <div class="side-foot">
+      <button class="nav-item" data-view="settings">
+        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="10" cy="10" r="2.6"/><path d="M10 2.8v2.4M10 14.8v2.4M2.8 10h2.4M14.8 10h2.4M4.9 4.9l1.7 1.7M13.4 13.4l1.7 1.7M15.1 4.9l-1.7 1.7M6.6 13.4l-1.7 1.7"/></svg>
+        <span>Settings</span>
+      </button>
+      <div class="eco-note">Zeqou ecosystem · v1.1.0</div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-btn" id="btnSide" title="Toggle sidebar (Ctrl+/)" aria-label="Toggle sidebar">
+        <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3.5 5.5h13M3.5 10h13M3.5 14.5h13"/></svg>
+      </button>
+      <button class="proj-btn" id="projectBtn"><span id="projectBtnLabel">Personal</span><span class="caret">▾</span></button>
+      <div id="runChip" class="run-chip" hidden></div>
+      <div class="mode-switch" role="tablist" aria-label="Mode">
+        <button id="modeChat" class="mode-btn active" role="tab">Chat</button>
+        <button id="modeAgent" class="mode-btn" role="tab">Agent</button>
+      </div>
+      <div class="top-spacer"></div>
+      <button class="quiet-btn" id="btnMemoryToggle" title="Memory for this chat"><span class="qdot"></span><span id="memToggleLabel">Memory on</span></button>
+      <button class="icon-btn" id="btnMore" title="More options" aria-label="More options">•••</button>
+    </header>
+
+    <div class="content-scroll" id="contentScroll">
+      <section id="view-chat" class="view"></section>
+      <section id="view-history" class="view wide" hidden></section>
+      <section id="view-memories" class="view wide" hidden></section>
+      <section id="view-tools" class="view wide" hidden></section>
+      <section id="view-mcp" class="view wide" hidden></section>
+      <section id="view-models" class="view wide" hidden></section>
+      <section id="view-projects" class="view wide" hidden></section>
+      <section id="view-files" class="view wide" hidden></section>
+      <section id="view-settings" class="view wide" hidden></section>
+    </div>
+
+    <!-- Composer -->
+    <button id="toBottom" class="to-bottom" title="Scroll to latest" aria-label="Scroll to latest">↓</button>
+    <footer class="composer-wrap" id="composerWrap">
+      <div id="attachBar" class="attach-bar" hidden></div>
+      <div id="dropHint" class="drop-hint" hidden>Drop files to attach</div>
+      <div class="composer" id="composer">
+        <div class="c-row">
+          <button class="plus-btn" id="btnAttach" title="Add…" aria-label="Add">+</button>
+          <textarea id="composerInput" rows="1" placeholder="Ask anything…" aria-label="Message input"></textarea>
+          <button class="send-btn" id="btnSend" title="Send" aria-label="Send">
+            <svg id="sendIcon" viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M3.5 10 17 3.5 10.5 17 8.8 11.2 3.5 10Z" stroke-linejoin="round"/></svg>
+            <span id="stopIcon" style="display:none">■</span>
+          </button>
+        </div>
+        <div class="c-row controls">
+          <button class="model-btn" id="pillModel" title="Select model"><span class="live" id="modelLiveDot" style="display:none"></span><span id="pillModelLabel">Select model</span><span class="caret">▾</span></button>
+          <button class="ctx-ring" id="ctxRing" title="Context usage" aria-label="Context usage">
+            <svg viewBox="0 0 20 20" width="16" height="16">
+              <circle class="ctx-ring-bg" cx="10" cy="10" r="7.5" />
+              <circle class="ctx-ring-fg" id="ctxRingFg" cx="10" cy="10" r="7.5" />
+            </svg>
+            <span class="ctx-ring-num" id="ctxRingNum">%</span>
+          </button>
+          <button class="mini-select" id="pillAgent" title="Select agent" style="display:none"><span id="pillAgentLabel">Agent</span><span class="caret">▾</span></button>
+          <span class="c-spacer"></span>
+          <button class="tgl" id="tglTools" title="Tools"><span class="tdot"></span><span class="tgl-label">Tools</span></button>
+          <button class="tgl" id="tglMcp" title="MCP"><span class="tdot"></span><span class="tgl-label">MCP</span></button>
+          <button class="tgl" id="tglWeb" title="Web search"><span class="tdot"></span><span class="tgl-label">Web</span></button>
+        </div>
+      </div>
+    </footer>
+  </main>
+
+  <div id="drawerRoot"></div>
+  <div id="popRoot"></div>
+  <div id="modalRoot"></div>
+  <div id="menuRoot"></div>
+  <div id="toastRoot" class="toasts" aria-live="polite"></div>
+</div>
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>

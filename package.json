@@ -1,0 +1,39 @@
+{
+  "name": "zeqou-harness",
+  "version": "1.1.0",
+  "description": "Zeqou Harness — premium desktop workspace for AI models and agents",
+  "main": "main.js",
+  "author": "Zeqou",
+  "license": "PolyForm-Strict-1.0.0",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "dist": "electron-builder --publish never",
+    "pack": "electron-builder --dir --publish never"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "ai.zeqou.harness",
+    "productName": "Zeqou Harness",
+    "win": {
+      "icon": "ico.png",
+      "target": ["nsis", "portable"]
+    },
+    "mac": {
+      "icon": "ico.png"
+    },
+    "linux": {
+      "icon": "ico.png"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "ico.png",
+      "package.json"
+    ]
+  }
+}
