@@ -3,7 +3,7 @@
   "version": "1.2.0",
   "description": "Zeqou Harness — premium desktop workspace for AI models and agents",
   "main": "main.js",
-  "author": "Zeqou",
+  "author": "Zeqou <misakolot6@gmail.com>",
   "license": "PolyForm-Strict-1.0.0",
   "scripts": {
     "start": "electron .",
