@@ -9,7 +9,7 @@ import { runAgent, getWebConfig } from './agent.js';
 import { contextUsage, knownContextFor, estimateTokens } from './context.js';
 import { blankMcpServer, mcpLog, testServer, refreshTools } from './mcp.js';
 import { renderChat } from './view-chat.js';
-import { renderHistory, renderMemories, renderTools, renderMcp, renderModels, renderProjects, renderFiles } from './view-panels.js';
+import { renderHistory, renderMemories, renderTools, renderMcp, renderModels, renderProjects, renderFiles, renderTasks } from './view-panels.js';
 import { renderSettings } from './view-settings.js';
 
 const $ = (s) => document.querySelector(s);
@@ -288,7 +288,7 @@ function renderAll() {
   $('#memToggleLabel').textContent = memOff ? 'Memory off' : 'Memory on';
   $('#btnMemoryToggle').classList.toggle('on', !memOff);
   $('#composerWrap').style.display = s.view === 'chat' ? '' : 'none';
-  const views = ['chat', 'history', 'memories', 'tools', 'mcp', 'models', 'projects', 'files', 'settings'];
+  const views = ['chat', 'history', 'tasks', 'memories', 'tools', 'mcp', 'models', 'projects', 'files', 'settings'];
   for (const v of views) {
     const sec = $('#view-' + v);
     const on = s.view === v;
@@ -296,6 +296,7 @@ function renderAll() {
     if (on) {
       if (v === 'chat') renderChat(sec, s, api);
       else if (v === 'history') renderHistory(sec, s, api);
+      else if (v === 'tasks') renderTasks(sec, s, api);
       else if (v === 'memories') renderMemories(sec, s, api);
       else if (v === 'tools') renderTools(sec, s, api);
       else if (v === 'mcp') renderMcp(sec, s, api);
@@ -335,6 +336,15 @@ function switchChatKeepRuns(chatId) {
 function refreshCounts() {
   const s = store.state;
   $('#dotMcp')?.classList.toggle('on', s.mcpServers.some(m => m.enabled && m.status === 'online'));
+  refreshTaskDot();
+}
+/* Sidebar dot on Tasks: lit while the agent has work in progress. */
+function refreshTaskDot() {
+  const s = store.state;
+  const doing = (s.tasks || []).some(t => t.status === 'doing');
+  const open = (s.tasks || []).some(t => t.status !== 'done');
+  const dot = $('#dotTasks');
+  if (dot) { dot.classList.toggle('on', doing); dot.title = doing ? 'The agent is working on a task' : open ? 'Open tasks' : ''; }
 }
 /* Context-usage ring in the composer: % of the model's context in use. */
 function updateCtxRing() {
@@ -1050,7 +1060,7 @@ async function generateChat(chat, mdl, run) {
       if (!(await confirmToolUse(c.function.name, args))) {
         rec = { id: uid('tc'), tool: c.function.name, args, ok: false, result: 'Denied by user.', at: now(), chatId: chat.id, ms: 0 };
       } else {
-        rec = await executeTool(store.state, c.function.name, args, { projectId: chat.projectId, base: projectBase(chat.projectId), chatId: chat.id, webConfig: getWebConfig(), compact: (o = {}) => compactChat(chat, mdl, run, o) });
+        rec = await executeTool(store.state, c.function.name, args, { projectId: chat.projectId, base: projectBase(chat.projectId), chatId: chat.id, webConfig: getWebConfig(), compact: (o = {}) => compactChat(chat, mdl, run, o), onTaskChange: () => refreshTaskDot() });
       }
       store.update(st => { st.toolCalls.unshift(rec); }, true);
       toolHistory.push({ name: c.function.name, args, ok: rec.ok, result: rec.result, ms: rec.ms });
@@ -1131,6 +1141,11 @@ async function generateAgent(chat, mdl, run) {
         run.status = `Step ${ev.n} · done`;
       }
       else if (ev.kind === 'final') { run.text = ev.text; run.status = 'Done'; }
+      else if (ev.kind === 'tasks') {
+        // The agent touched its todo list — repaint the Tasks view if open.
+        if (store.state.view === 'tasks') renderAll();
+        refreshTaskDot();
+      }
       scheduleRunPaint(run);
     }
   });

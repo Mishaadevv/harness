@@ -95,6 +95,24 @@ export const BUILTIN_TOOLS = [
       }
     },
     permissions: 'safe', timeoutMs: 90000
+  },
+  {
+    id: 'todo', name: 'todo',
+    description: 'Manage your own task list (a todo list the user can watch live in the Tasks panel). Actions: add — create a task (optionally with a one-line plan); update — change title/plan/priority; status — mark pending|doing|done; remove — delete; list — show the current list. Use it for any multi-step job: plan the steps first, mark a task doing when you start it and done when it is finished, so the user can follow progress.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', description: 'add | update | status | remove | list', enum: ['add', 'update', 'status', 'remove', 'list'] },
+        id: { type: 'string', description: 'Task id (returned when created; list shows ids). Required for update/status/remove.' },
+        title: { type: 'string', description: 'Task title (add/update)' },
+        plan: { type: 'string', description: 'One-line plan or note for how you will do it (add/update, optional)' },
+        priority: { type: 'string', description: 'low | normal | high (add/update, optional)' },
+        status: { type: 'string', description: 'pending | doing | done (status action)', enum: ['pending', 'doing', 'done'] },
+        chatId: { type: 'string', description: 'Internal — set automatically by the harness' }
+      },
+      required: ['action']
+    },
+    permissions: 'safe', timeoutMs: 3000
   }
 ];
 
@@ -156,6 +174,7 @@ export async function executeTool(state, toolName, args, ctx = {}) {
     else if (toolName === 'compact_context') out = await (ctx.compact
       ? ctx.compact({ instructions: args?.instructions || '' })
       : Promise.resolve('Context compaction is not available here (no active run).'));
+    else if (toolName === 'todo') out = runTodo(state, args, ctx);
     else if (toolName.startsWith('mcp__')) out = await runMcpTool(state, toolName, args);
     else {
       const custom = state.tools.find(t => t.name === toolName && t.custom);
@@ -347,4 +366,83 @@ async function runCustomTool(custom, args) {
     return t.slice(0, 6000);
   }
   throw new Error('Custom tool has no webhook configured');
+}
+
+/* ── todo: the agent's own task list ─────────────────────────────────────
+ * State lives in store.state.tasks so the Tasks panel can render it live.
+ * A hook (ctx.onTaskChange) is called after every mutation so an open run
+ * view repaints immediately without waiting for the next store emit. */
+export const TASK_STATUSES = ['pending', 'doing', 'done'];
+
+function taskLine(t) {
+  const mark = t.status === 'done' ? '[x]' : t.status === 'doing' ? '[~]' : '[ ]';
+  const prio = t.priority && t.priority !== 'normal' ? ` (${t.priority})` : '';
+  const plan = t.plan ? ` — ${t.plan}` : '';
+  return `${mark} #${t.id}${prio} ${t.title}${plan}`;
+}
+
+export function runTodo(state, args, ctx = {}) {
+  const action = String(args.action || 'list').toLowerCase();
+  state.tasks = Array.isArray(state.tasks) ? state.tasks : [];
+  const done = (out) => {
+    ctx.onTaskChange && ctx.onTaskChange();
+    return out;
+  };
+
+  if (action === 'add') {
+    const title = String(args.title || '').trim();
+    if (!title) throw new Error('title is required for the add action');
+    if (state.tasks.length >= 100) throw new Error('Too many tasks (limit 100) — remove finished ones first');
+    const task = {
+      id: uid('task'),
+      chatId: ctx.chatId || null,
+      title: title.slice(0, 200),
+      plan: String(args.plan || '').slice(0, 300) || null,
+      priority: ['low', 'normal', 'high'].includes(args.priority) ? args.priority : 'normal',
+      status: 'pending',
+      createdAt: now(),
+      updatedAt: now()
+    };
+    state.tasks.push(task);
+    return done(`Created task ${task.id}: ${taskLine(task)}`);
+  }
+
+  const findTask = () => {
+    const t = state.tasks.find(x => x.id === args.id || x.id === String(args.id || '').replace(/^#/, ''));
+    if (!t) throw new Error(`Task "${args.id}" not found. Call the todo tool with action=list to see current ids.`);
+    return t;
+  };
+
+  if (action === 'update') {
+    const t = findTask();
+    if (args.title !== undefined) { const v = String(args.title).trim(); if (v) t.title = v.slice(0, 200); }
+    if (args.plan !== undefined) t.plan = String(args.plan || '').slice(0, 300) || null;
+    if (args.priority !== undefined && ['low', 'normal', 'high'].includes(args.priority)) t.priority = args.priority;
+    t.updatedAt = now();
+    return done(`Updated task ${t.id}: ${taskLine(t)}`);
+  }
+
+  if (action === 'status') {
+    const t = findTask();
+    const st = String(args.status || '').toLowerCase();
+    if (!TASK_STATUSES.includes(st)) throw new Error('status must be one of: pending, doing, done');
+    t.status = st;
+    t.updatedAt = now();
+    return done(`Task ${t.id} is now ${st}: ${taskLine(t)}`);
+  }
+
+  if (action === 'remove') {
+    const idx = state.tasks.findIndex(x => x.id === args.id || x.id === String(args.id || '').replace(/^#/, ''));
+    if (idx < 0) throw new Error(`Task "${args.id}" not found. Call the todo tool with action=list to see current ids.`);
+    const [removed] = state.tasks.splice(idx, 1);
+    return done(`Removed task ${removed.id}: ${removed.title}`);
+  }
+
+  if (action === 'list') {
+    if (!state.tasks.length) return 'The task list is empty. Create tasks with action=add when you plan a multi-step job.';
+    const counts = TASK_STATUSES.map(s => `${state.tasks.filter(t => t.status === s).length} ${s}`).join(', ');
+    return `Tasks (${counts}):\n` + state.tasks.map(taskLine).join('\n');
+  }
+
+  throw new Error('Unknown action — use add, update, status, remove or list');
 }

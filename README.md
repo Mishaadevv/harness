@@ -8,6 +8,7 @@ Part of the [Zeqou ecosystem](https://mishaadevv.github.io/zeqou/).
 
 - Agent and model workspace on desktop
 - Tools, memory and MCP support
+- **Agent todo list**: for multi-step jobs the agent plans its work with the `todo` tool — the Tasks panel shows the plan live, with pending/doing/done status you can also edit by hand
 - Works with OpenAI, Anthropic, Google, OpenRouter, Ollama and custom endpoints
 
 ## Develop

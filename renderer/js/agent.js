@@ -22,7 +22,10 @@ export async function runAgent({ state, chat, provider, model, userText, attachm
     mems.length ? memorySystemBlock(mems) : '',
     'You are running in Agent Mode. Think step by step. Use tools when they help. ' +
     'After each tool result, decide the next step. When finished, write the final response. ' +
-    'Keep intermediate reasoning compact; the UI shows timeline steps.'
+    'Keep intermediate reasoning compact; the UI shows timeline steps. ' +
+    'For any job with several steps, keep a visible plan: create tasks with the todo tool ' +
+    '(action=add), mark a task doing when you start it and done when it is finished, ' +
+    'and add new tasks as you discover more work. The user watches this list live.'
   ].filter(Boolean).join('\n\n');
 
   const history = chat.messages
@@ -94,7 +97,7 @@ export async function runAgent({ state, chat, provider, model, userText, attachm
       try { args = JSON.parse(c.function.arguments || '{}'); } catch { args = { _raw: c.function.arguments }; }
       onEvent({ kind: 'tool', n: stepNo, name, args });
       const proj = state.projects.find(p => p.id === chat.projectId);
-      const ctx = { projectId: chat.projectId, base: proj?.localPath || null, chatId: chat.id, webConfig, compact };
+      const ctx = { projectId: chat.projectId, base: proj?.localPath || null, chatId: chat.id, webConfig, compact, onTaskChange: () => onEvent({ kind: 'tasks', n: stepNo }) };
       let rec;
       if (name === 'compact_context' && compact) {
         onEvent({ kind: 'compacting', n: stepNo });
