@@ -710,3 +710,41 @@ body::after {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* ---------- In-chat todo list (live, agent-owned) ---------- */
+.todo-live {
+  border-top: 1px solid var(--border-soft);
+  margin-top: 14px; padding-top: 6px;
+}
+.todo-head { display: flex; align-items: center; gap: 8px; padding: 4px 4px 2px; }
+.todo-title { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); }
+.todo-count { font-size: 11px; color: var(--text-3); }
+.todo-add-btn {
+  background: none; border: 0; color: var(--text-3); cursor: pointer; font-size: 14px;
+  width: 22px; height: 22px; border-radius: 6px; line-height: 1;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.todo-add-btn:hover { background: var(--hover); color: var(--text); }
+.todo-rows { display: flex; flex-direction: column; }
+.todo-empty { font-size: 12px; color: var(--text-3); padding: 6px 4px 10px; }
+.todo-row { display: flex; align-items: baseline; gap: 8px; padding: 4px 4px; border-radius: var(--r-sm); }
+.todo-row:hover { background: var(--hover); }
+.todo-row.done .todo-name { text-decoration: line-through; opacity: .5; }
+.todo-mark {
+  background: none; border: 0; cursor: pointer; color: var(--text-2); font-size: 13px;
+  width: 20px; flex: none; text-align: center; padding: 0;
+}
+.todo-row.doing .todo-mark { color: var(--acc); animation: runPing 1.4s ease-in-out infinite; }
+.todo-row.done .todo-mark { color: var(--green); }
+.todo-main { min-width: 0; }
+.todo-name { font-size: 13px; color: var(--text); white-space: normal; }
+.todo-plan { font-size: 11.5px; color: var(--text-3); white-space: normal; }
+.todo-prio {
+  font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--amber); flex: none; align-self: center;
+}
+.todo-input {
+  width: 100%; background: var(--panel-2); border: 1px solid var(--acc); border-radius: 8px;
+  padding: 7px 10px; font-size: 13px; outline: none; margin: 4px 0;
+  box-shadow: 0 0 0 3px var(--acc-soft);
+}

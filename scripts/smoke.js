@@ -4,7 +4,7 @@
 const { spawn } = require('child_process');
 const http = require('http');
 
-const TABS = ['chat', 'history', 'projects', 'files', 'models', 'tasks', 'memories', 'tools', 'mcp', 'settings'];
+const TABS = ['chat', 'history', 'projects', 'files', 'models', 'memories', 'tools', 'mcp', 'settings'];
 const PORT = 9333;
 const BOOT_MS = 20000;
 

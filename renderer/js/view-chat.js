@@ -45,6 +45,7 @@ export function renderChat(root, state, api) {
     if (m._hidden) continue;
     root.appendChild(messageNode(m, state, api));
   }
+  root.appendChild(todoNode(state, chat, api));
   if (api.streaming) {
     const s = api.streaming;
     if (!live || live.chatId !== s.chatId || live.run !== s) live = createLiveNode(s);
@@ -52,6 +53,77 @@ export function renderChat(root, state, api) {
     syncLive(s, state);
   } else if (live) {
     live = null;
+  }
+}
+
+/* ---------------- In-chat todo list (live) ----------------
+ * The agent's task list lives INSIDE the chat: quiet header row, tasks as
+ * rows, ••• menu with actions. The agent repaints it live via the todo tool. */
+const TODO_ORDER = { doing: 0, pending: 1, done: 2 };
+export function todoNode(state, chat, api) {
+  const d = el(`<div class="todo-live"></div>`);
+  paintTodoList(d, state, chat, api);
+  return d;
+}
+export function paintTodoList(node, state = null, chat = null, api = null) {
+  state = state || window.__todoState;
+  chat = chat || (state ? state.chats.find(c => c.id === state.activeChatId) : null);
+  if (!state) return;
+  window.__todoState = state;
+  const tasks = (state.tasks || []).filter(t => !chat || !t.chatId || t.chatId === chat.id);
+  const open = tasks.filter(t => t.status !== 'done').length;
+  const doneCount = tasks.length - open;
+  node.innerHTML = `
+    <div class="todo-head">
+      <span class="todo-title">Tasks</span>
+      <span class="todo-count">${tasks.length ? `${open} open${doneCount ? ' · ' + doneCount + ' done' : ''}` : 'empty'}</span>
+      <span style="flex:1"></span>
+      <button class="todo-add-btn" title="Add a task">＋</button>
+    </div>
+    <div class="todo-rows"></div>`;
+  const rows = node.querySelector('.todo-rows');
+  if (!tasks.length) {
+    rows.innerHTML = `<div class="todo-empty">No tasks. Ask the agent to plan something multi-step — its plan will appear here.</div>`;
+  }
+  for (const t of [...tasks].sort((a, b) => (TODO_ORDER[a.status] - TODO_ORDER[b.status]) || (b.updatedAt - a.updatedAt))) {
+    const mark = t.status === 'done' ? '☑' : t.status === 'doing' ? '◐' : '☐';
+    const row = el(`<div class="todo-row ${t.status}">
+      <button class="todo-mark" title="Cycle pending → doing → done">${mark}</button>
+      <div class="todo-main">
+        <div class="todo-name">${esc(t.title)}</div>
+        ${t.plan ? `<div class="todo-plan">${esc(t.plan)}</div>` : ''}
+      </div>
+      ${t.priority === 'high' ? '<span class="todo-prio">high</span>' : ''}
+    </div>`);
+    row.querySelector('.todo-mark').onclick = () => {
+      apiRef(s => {
+        const x = (s.tasks || []).find(y => y.id === t.id);
+        if (x) { x.status = x.status === 'pending' ? 'doing' : x.status === 'doing' ? 'done' : 'pending'; x.updatedAt = Date.now(); }
+      });
+    };
+    const addBtn = node.querySelector('.todo-add-btn');
+    addBtn.onclick = () => {
+      const input = el(`<input class="todo-input" placeholder="New task — Enter to add, Esc to cancel" />`);
+      rows.parentNode.insertBefore(input, rows);
+      input.focus();
+      input.onkeydown = (e) => {
+        if (e.key === 'Escape') { input.remove(); }
+        if (e.key === 'Enter') {
+          const v = input.value.trim();
+          input.remove();
+          if (!v) return;
+          apiRef(s => {
+            s.tasks = Array.isArray(s.tasks) ? s.tasks : [];
+            s.tasks.push({ id: 'task_' + Math.random().toString(36).slice(2, 9), chatId: chat?.id || null, title: v.slice(0, 200), plan: null, priority: 'normal', status: 'pending', createdAt: Date.now(), updatedAt: Date.now() });
+          });
+        }
+      };
+    };
+    rows.appendChild(row);
+  }
+  function apiRef(mut) {
+    if (api && api.update) api.update(mut);
+    else if (window.__todoApi?.update) window.__todoApi.update(mut);
   }
 }
 

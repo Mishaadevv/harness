@@ -98,7 +98,7 @@ export const BUILTIN_TOOLS = [
   },
   {
     id: 'todo', name: 'todo',
-    description: 'Manage your own task list (a todo list the user can watch live in the Tasks panel). Actions: add — create a task (optionally with a one-line plan); update — change title/plan/priority; status — mark pending|doing|done; remove — delete; list — show the current list. Use it for any multi-step job: plan the steps first, mark a task doing when you start it and done when it is finished, so the user can follow progress.',
+    description: 'Manage your own task list (a todo list the user can watch live in the chat). Actions: add - create a task (optionally with a one-line plan); update - change title/plan/priority; status - mark pending, doing or done; remove - delete; list - show the current list. Use it for any multi-step job: plan the steps first, mark a task doing when you start it and done when it is finished, so the user can follow progress.',
     parameters: {
       type: 'object',
       properties: {
@@ -106,9 +106,9 @@ export const BUILTIN_TOOLS = [
         id: { type: 'string', description: 'Task id (returned when created; list shows ids). Required for update/status/remove.' },
         title: { type: 'string', description: 'Task title (add/update)' },
         plan: { type: 'string', description: 'One-line plan or note for how you will do it (add/update, optional)' },
-        priority: { type: 'string', description: 'low | normal | high (add/update, optional)' },
+        priority: { type: 'string', description: 'low | normal | high (add/update, optional)', enum: ['low', 'normal', 'high'] },
         status: { type: 'string', description: 'pending | doing | done (status action)', enum: ['pending', 'doing', 'done'] },
-        chatId: { type: 'string', description: 'Internal — set automatically by the harness' }
+        chatId: { type: 'string', description: 'Internal - set automatically by the harness' }
       },
       required: ['action']
     },
@@ -116,8 +116,37 @@ export const BUILTIN_TOOLS = [
   }
 ];
 
+/* Make a JSON Schema safe for strict OpenAI-compatible providers (Gemini,
+ * Mistral, …). Gemini's compatibility layer rejects schemas where a property
+ * has no "type" ("Request contains an invalid argument"), where "enum"
+ * appears without a sibling "type", where a field description is not a
+ * string, or where "required" mentions unknown properties. It also dislikes
+ * $schema/$ref/definitions and additionalProperties-as-object. */
+export function sanitizeJsonSchema(schema, depth = 0) {
+  if (depth > 8 || !schema || typeof schema !== 'object' || Array.isArray(schema)) return { type: 'object', properties: {} };
+  const clean = {};
+  for (const k of ['type', 'format', 'description', 'enum', 'items', 'properties', 'required', 'minimum', 'maximum']) {
+    if (schema[k] !== undefined) clean[k] = schema[k];
+  }
+  if (!clean.type) {
+    clean.type = clean.properties || clean.required ? 'object' : (clean.items ? 'array' : (clean.enum ? 'string' : 'string'));
+  }
+  if (clean.type === 'object') {
+    clean.properties = {};
+    for (const [k, v] of Object.entries(schema.properties || {})) clean.properties[k] = sanitizeJsonSchema(v, depth + 1);
+    clean.required = (Array.isArray(clean.required) ? clean.required : []).filter(r =>
+      typeof r === 'string' && clean.properties[r] !== undefined);
+    if (!clean.required.length) delete clean.required;
+  }
+  if (clean.type === 'array' && schema.items) clean.items = sanitizeJsonSchema(schema.items, depth + 1);
+  if (clean.enum && !clean.type) clean.type = 'string';
+  if (clean.description !== undefined && typeof clean.description !== 'string') clean.description = JSON.stringify(clean.description);
+  if (clean.type === 'string' && clean.format === 'date-time') delete clean.format; // Gemini rejects date-time on strings
+  return clean;
+}
+
 export function toolToOpenAI(t) {
-  return { type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters || { type: 'object', properties: {} } } };
+  return { type: 'function', function: { name: t.name, description: t.description, parameters: sanitizeJsonSchema(t.parameters || { type: 'object', properties: {} }) } };
 }
 
 export function enabledOpenAITools(state, chat) {

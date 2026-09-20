@@ -96,6 +96,10 @@ export async function runAgent({ state, chat, provider, model, userText, attachm
       let args = {};
       try { args = JSON.parse(c.function.arguments || '{}'); } catch { args = { _raw: c.function.arguments }; }
       onEvent({ kind: 'tool', n: stepNo, name, args });
+      if (name === 'todo' && args && args.action === 'status' && args.status === 'doing' && args.id) {
+        const t = (state.tasks || []).find(x => x.id === args.id || x.id === String(args.id).replace(/^#/, ''));
+        if (t) onEvent({ kind: 'task-status', title: t.title });
+      }
       const proj = state.projects.find(p => p.id === chat.projectId);
       const ctx = { projectId: chat.projectId, base: proj?.localPath || null, chatId: chat.id, webConfig, compact, onTaskChange: () => onEvent({ kind: 'tasks', n: stepNo }) };
       let rec;

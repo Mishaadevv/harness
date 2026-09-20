@@ -3,13 +3,13 @@
 import { uid, now, esc, el, openModal, openMenu, closeMenu, toast, humanError, download, debounce, fmtTokens } from './utils.js';
 import { store, activeProject } from './store.js';
 import { providerById, allModels, modelRefOf, resolveModelRef, streamChat, guessCaps, providerSnapshot } from './providers.js';
-import { enabledOpenAITools, executeTool, toolCapabilityLine } from './tools.js';
+import { enabledOpenAITools, executeTool, toolCapabilityLine, sanitizeJsonSchema } from './tools.js';
 import { relevantMemories, memorySystemBlock, addMemory } from './memory.js';
 import { runAgent, getWebConfig } from './agent.js';
 import { contextUsage, knownContextFor, estimateTokens } from './context.js';
 import { blankMcpServer, mcpLog, testServer, refreshTools } from './mcp.js';
 import { renderChat } from './view-chat.js';
-import { renderHistory, renderMemories, renderTools, renderMcp, renderModels, renderProjects, renderFiles, renderTasks } from './view-panels.js';
+import { renderHistory, renderMemories, renderTools, renderMcp, renderModels, renderProjects, renderFiles } from './view-panels.js';
 import { renderSettings } from './view-settings.js';
 
 const $ = (s) => document.querySelector(s);
@@ -23,6 +23,7 @@ let openDrawerKind = null;
 
 const api = {
   get streaming() { return streaming; },
+  refreshChatTodo,
   runs,
   chatRuns: (id) => runs.has(id),
   update(fn, save) { store.update(fn, save !== false); },
@@ -288,7 +289,7 @@ function renderAll() {
   $('#memToggleLabel').textContent = memOff ? 'Memory off' : 'Memory on';
   $('#btnMemoryToggle').classList.toggle('on', !memOff);
   $('#composerWrap').style.display = s.view === 'chat' ? '' : 'none';
-  const views = ['chat', 'history', 'tasks', 'memories', 'tools', 'mcp', 'models', 'projects', 'files', 'settings'];
+  const views = ['chat', 'history', 'memories', 'tools', 'mcp', 'models', 'projects', 'files', 'settings'];
   for (const v of views) {
     const sec = $('#view-' + v);
     if (!sec) continue; // unknown view id: skip instead of killing the whole render pass
@@ -297,7 +298,6 @@ function renderAll() {
     if (on) {
       if (v === 'chat') renderChat(sec, s, api);
       else if (v === 'history') renderHistory(sec, s, api);
-      else if (v === 'tasks') renderTasks(sec, s, api);
       else if (v === 'memories') renderMemories(sec, s, api);
       else if (v === 'tools') renderTools(sec, s, api);
       else if (v === 'mcp') renderMcp(sec, s, api);
@@ -337,15 +337,11 @@ function switchChatKeepRuns(chatId) {
 function refreshCounts() {
   const s = store.state;
   $('#dotMcp')?.classList.toggle('on', s.mcpServers.some(m => m.enabled && m.status === 'online'));
-  refreshTaskDot();
 }
-/* Sidebar dot on Tasks: lit while the agent has work in progress. */
-function refreshTaskDot() {
-  const s = store.state;
-  const doing = (s.tasks || []).some(t => t.status === 'doing');
-  const open = (s.tasks || []).some(t => t.status !== 'done');
-  const dot = $('#dotTasks');
-  if (dot) { dot.classList.toggle('on', doing); dot.title = doing ? 'The agent is working on a task' : open ? 'Open tasks' : ''; }
+/* Live repaint of the in-chat todo list (no chat re-render needed). */
+function refreshChatTodo() {
+  const node = document.querySelector('#view-chat .todo-live');
+  if (node) paintTodoList(node);
 }
 /* Context-usage ring in the composer: % of the model's context in use. */
 function updateCtxRing() {
@@ -828,7 +824,22 @@ async function buildMessages(chat, extraSystem = '') {
     used += len;
     hist.unshift({ role: m.role === 'tool' ? 'tool' : m.role, content: c });
   }
-  const clean = hist.filter((m, i) => m.role !== 'tool' || (m.content && i > 0));
+  // Truncation above can leave a tool result or an assistant tool_calls turn
+  // without its pair. Strict providers (Gemini, Mistral, Anthropic-proxy)
+  // reject such histories with INVALID_ARGUMENT — drop orphans here.
+  const clean = [];
+  for (let i = 0; i < hist.length; i++) {
+    const m = hist[i];
+    if (m.role === 'tool') {
+      const prev = hist[i - 1];
+      if (!m.content || !prev || prev.role !== 'assistant' || !Array.isArray(prev.tool_calls) || !prev.tool_calls.length) continue;
+    }
+    if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      const next = hist[i + 1];
+      if (!next || next.role !== 'tool') { delete m.tool_calls; if (m.content == null) continue; }
+    }
+    clean.push(m);
+  }
   const pre = idx >= 0 ? [{ role: 'user', content: '[Summary of the earlier part of this conversation]\n' + comp.summary + '\n[End of summary. Continue naturally.]' }] : [];
   return { messages: [{ role: 'system', content: sys }, ...pre, ...clean.map(m => ({ role: m.role, content: m.content }))], mems };
 }
@@ -1061,7 +1072,7 @@ async function generateChat(chat, mdl, run) {
       if (!(await confirmToolUse(c.function.name, args))) {
         rec = { id: uid('tc'), tool: c.function.name, args, ok: false, result: 'Denied by user.', at: now(), chatId: chat.id, ms: 0 };
       } else {
-        rec = await executeTool(store.state, c.function.name, args, { projectId: chat.projectId, base: projectBase(chat.projectId), chatId: chat.id, webConfig: getWebConfig(), compact: (o = {}) => compactChat(chat, mdl, run, o), onTaskChange: () => refreshTaskDot() });
+        rec = await executeTool(store.state, c.function.name, args, { projectId: chat.projectId, base: projectBase(chat.projectId), chatId: chat.id, webConfig: getWebConfig(), compact: (o = {}) => compactChat(chat, mdl, run, o), onTaskChange: () => refreshChatTodo() });
       }
       store.update(st => { st.toolCalls.unshift(rec); }, true);
       toolHistory.push({ name: c.function.name, args, ok: rec.ok, result: rec.result, ms: rec.ms });
@@ -1081,7 +1092,7 @@ function collectMcpTools(s, chat) {
   for (const sv of s.mcpServers) {
     if (!sv.enabled || sv.status !== 'online') continue;
     for (const t of (sv.tools || [])) {
-      out.push({ type: 'function', function: { name: 'mcp__' + sv.id.slice(-4) + '__' + t.name, description: `[MCP:${sv.name}] ${t.description || t.name}`, parameters: t.inputSchema || { type: 'object', properties: {} } } });
+      out.push({ type: 'function', function: { name: 'mcp__' + sv.id.slice(-4) + '__' + t.name, description: `[MCP:${sv.name}] ${t.description || t.name}`, parameters: sanitizeJsonSchema(t.inputSchema || { type: 'object', properties: {} }) } });
     }
   }
   return out;
@@ -1135,6 +1146,7 @@ async function generateAgent(chat, mdl, run) {
       else if (ev.kind === 'thinking') { run.status = `Step ${ev.n} · thinking…`; run.statusAction = 'thinking'; }
       else if (ev.kind === 'step') { run.status = `Step ${ev.n}/${ev.of}…`; }
       else if (ev.kind === 'tool') { (run.toolCards = run.toolCards || []).push({ name: ev.name, args: ev.args, result: 'Running…', ok: null }); run.status = `Step ${ev.n} · ${ev.name}…`; }
+      else if (ev.kind === 'task-status') { run.status = `Working on: ${ev.title}`; }
       else if (ev.kind === 'result') {
         const c = (run.toolCards || []).find(t => t.name === ev.name && t.ok == null);
         if (c) { c.result = ev.result; c.ok = ev.ok; c.ms = ev.ms; }
@@ -1143,9 +1155,8 @@ async function generateAgent(chat, mdl, run) {
       }
       else if (ev.kind === 'final') { run.text = ev.text; run.status = 'Done'; }
       else if (ev.kind === 'tasks') {
-        // The agent touched its todo list — repaint the Tasks view if open.
-        if (store.state.view === 'tasks') renderAll();
-        refreshTaskDot();
+        // The agent touched its todo list — repaint the in-chat list.
+        refreshChatTodo();
       }
       scheduleRunPaint(run);
     }

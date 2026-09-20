@@ -260,9 +260,12 @@ function openAIChatBody(provider, model, messages, opts) {
   const body = { model, messages, stream: !!opts.stream };
   if (opts.temperature != null && opts.temperature !== '') body.temperature = Number(opts.temperature);
   if (opts.maxTokens != null && opts.maxTokens !== '') body.max_tokens = Number(opts.maxTokens);
-  if (opts.reasoningEffort && opts.reasoningEffort !== 'off') {
-    body.reasoning_effort = opts.reasoningEffort; // OpenAI o-series / compatible
-    body.reasoning = { effort: opts.reasoningEffort };
+  // reasoning_effort is an OpenAI-only option. Sending it to any other
+  // endpoint makes strict providers (Gemini, Mistral, …) reject the whole
+  // request with INVALID_ARGUMENT / invalid argument errors.
+  const isOpenAI = provider.type === 'openai' || /api\.openai\.com|openai\.azure\.com|api\.githubcopilot\.com/i.test(String(provider.baseURL || ''));
+  if (isOpenAI && opts.reasoningEffort && opts.reasoningEffort !== 'off' && opts.reasoningEffort !== 'not_supported') {
+    body.reasoning_effort = opts.reasoningEffort;
   }
   if (opts.tools && opts.tools.length) {
     body.tools = opts.tools;
@@ -374,7 +377,10 @@ ipcMain.handle('zeqou:ai:chat', async (event, { requestId, provider, model, mess
           try {
             const j = JSON.parse(data);
             const delta = j.choices && j.choices[0] && j.choices[0].delta ? j.choices[0].delta : {};
-            // reasoning deltas (deepseek-reasoner, o-series style passthrough)
+            // Some OpenAI-compatible providers put the whole choice in the
+            // first chunk with empty delta, and fill fields later — guard all access.
+            if (j.error) { send('error', { error: (j.error.message || JSON.stringify(j.error)).slice(0, 600) }); return { ok: false }; }
+            // reasoning deltas (deepseek-reasoner style passthrough)
             const reasoning = delta.reasoning_content || delta.reasoning || '';
             if (reasoning) { send('reasoning', { text: reasoning }); full += ''; }
             if (delta.content) { full += delta.content; send('token', { text: delta.content }); }
