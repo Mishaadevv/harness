@@ -26,6 +26,10 @@ npm run pack     # unpacked build
 npm run dist     # Windows installer (NSIS) + portable
 ```
 
+The Windows installer is an assisted NSIS setup: it shows the PolyForm Strict
+1.0.0 license before copying anything and lets you choose the installation
+folder; the portable build needs no install.
+
 ## License
 
 [PolyForm Strict 1.0.0](LICENSE) — viewing and personal use are allowed; copying, modification, redistribution and derivative works are not permitted without the author's permission.

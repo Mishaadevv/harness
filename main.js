@@ -761,6 +761,33 @@ ipcMain.handle('zeqou:mcp:call', async (_e, { server, tool, args }) => {
   } catch (e) { return { ok: false, error: String(e.message || e).slice(0, 400) }; }
 });
 
+// Find a real Python interpreter on Windows: ask the py launcher first
+// (it knows every installed 3.x), fall back to well-known install dirs.
+// Never returns the WindowsApps Store alias stub.
+let _pythonCache = { exe: null, at: 0 };
+async function resolvePythonWindows() {
+  if (_pythonCache.exe && Date.now() - _pythonCache.at < 60000) return _pythonCache.exe;
+  const candidates = [];
+  candidates.push(await new Promise((resolve) => {
+    const py = spawn('py', ['-3', '-c', 'import sys; print(sys.executable)'], { windowsHide: true });
+    let out = '';
+    py.stdout.on('data', d => { out += d.toString(); });
+    py.on('error', () => resolve(null));
+    py.on('close', (code) => resolve(code === 0 ? out.trim().split(/\r?\n/).pop()?.trim() : null));
+  }));
+  for (const v of ['312', '311', '310', '313', '314']) {
+    candidates.push(path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Python', `Python${v}`, 'python.exe'));
+    candidates.push(`C:\\Python${v}\\python.exe`);
+  }
+  for (const cand of candidates) {
+    if (cand && fs.existsSync(cand) && !cand.includes('WindowsApps')) {
+      _pythonCache = { exe: cand, at: Date.now() };
+      return cand;
+    }
+  }
+  return null;
+}
+
 // Shell execution for the shell_exec tool. No shell: command + argv only,
 // confined to the project folder, hard timeout, truncated output.
 ipcMain.handle('zeqou:tools:exec', async (_e, { command, args = [], cwd = null, base = null, projectId = null, timeoutMs = 30000 }) => {
@@ -768,7 +795,15 @@ ipcMain.handle('zeqou:tools:exec', async (_e, { command, args = [], cwd = null, 
     if (!command || typeof command !== 'string') return { ok: false, error: 'Empty command' };
     const root = resolveRoot(projectId, base || cwd);
     const argv = Array.isArray(args) ? args.map(String) : String(args || '').split(/\s+/).filter(Boolean);
-    const child = spawn(command, argv, { cwd: root, timeout: Math.min(120000, Number(timeoutMs) || 30000), windowsHide: true });
+    // Windows ships a Store alias stub named python.exe that opens the Store
+    // and exits; resolve the *real* interpreter via the py launcher instead.
+    let program = command;
+    const baseName = path.basename(command).replace(/\.exe$/i, '');
+    if (/^(python3?|py)$/i.test(baseName)) {
+      const real = await resolvePythonWindows();
+      if (real) program = real;
+    }
+    const child = spawn(program, argv, { cwd: root, timeout: Math.min(120000, Number(timeoutMs) || 30000), windowsHide: true });
     let out = '', err = '';
     child.stdout.on('data', d => { out += d.toString(); if (out.length > 100000) out = out.slice(0, 100000); });
     child.stderr.on('data', d => { err += d.toString(); if (err.length > 100000) err = err.slice(0, 100000); });
