@@ -291,6 +291,7 @@ function renderAll() {
   const views = ['chat', 'history', 'tasks', 'memories', 'tools', 'mcp', 'models', 'projects', 'files', 'settings'];
   for (const v of views) {
     const sec = $('#view-' + v);
+    if (!sec) continue; // unknown view id: skip instead of killing the whole render pass
     const on = s.view === v;
     sec.hidden = !on;
     if (on) {
