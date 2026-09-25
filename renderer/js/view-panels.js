@@ -4,7 +4,7 @@ import { esc, timeAgo, el, openModal, openMenu, toast, download } from './utils.
 import { allModels, modelRefOf, guessCaps } from './providers.js';
 import { addMemory } from './memory.js';
 import { blankMcpServer, testServer, refreshTools, serverPayload } from './mcp.js';
-import { executeTool, runTodo } from './tools.js';
+import { executeTool } from './tools.js';
 import { getWebConfig } from './agent.js';
 import { uid, now } from './utils.js';
 
@@ -457,55 +457,6 @@ async function openMcpRunModal(sv, t, api) {
   await p;
 }
 
-/* ---------------- TASKS (agent todo list) ---------------- */
-export function renderTasks(root, state, api) {
-  root.innerHTML = `<div class="page-head"><h2>Tasks</h2><span class="muted" id="tCount"></span></div>
-    <div class="toolbar"><input class="search" id="kAdd" placeholder="Add a task and press Enter…" />
-    <button class="mini-btn" id="kClear" title="Remove finished tasks">Clear done</button></div>
-    <div id="kList"></div>
-    <p class="muted" style="padding:8px 2px;font-size:12px">The agent keeps this list itself with the <b>todo</b> tool while it works on multi-step jobs. You can also add tasks by hand.</p>`;
-  const paint = () => {
-    const list = root.querySelector('#kList'); list.innerHTML = '';
-    const tasks = state.tasks || [];
-    const open = tasks.filter(t => t.status !== 'done').length;
-    root.querySelector('#tCount').textContent = tasks.length ? `${open} open · ${tasks.length - open} done` : '';
-    if (!tasks.length) { list.appendChild(emptyState('☑', 'No tasks', 'Ask the agent to plan something multi-step — its plan appears here live.')); return; }
-    const order = { doing: 0, pending: 1, done: 2 };
-    for (const t of [...tasks].sort((a, b) => (order[a.status] - order[b.status]) || (b.updatedAt - a.updatedAt))) {
-      const mark = t.status === 'done' ? '☑' : t.status === 'doing' ? '◐' : '☐';
-      const sub = [t.plan, t.chatId ? (state.chats.find(c => c.id === t.chatId)?.title || '') : ''].filter(Boolean).join(' · ');
-      const row = el(`<div class="list-row"><div class="grow"><div class="title" style="white-space:normal;${t.status === 'done' ? 'text-decoration:line-through;opacity:.6' : ''}">${esc(mark)} ${esc(t.title)}${t.priority === 'high' ? ' <span class="badge">high</span>' : ''}</div>
-        ${sub ? `<div class="sub">${esc(sub)}</div>` : ''}</div></div>`);
-      // Click the title = cycle pending → doing → done.
-      row.querySelector('.title').onclick = () => {
-        api.update(s => {
-          const x = (s.tasks || []).find(y => y.id === t.id);
-          if (x) x.status = x.status === 'pending' ? 'doing' : x.status === 'doing' ? 'done' : 'pending';
-          if (x) x.updatedAt = now();
-        });
-      };
-      row.appendChild(moreBtn(row, [
-        { label: 'Mark doing', onClick: () => api.update(s => { const x = s.tasks.find(y => y.id === t.id); if (x) { x.status = 'doing'; x.updatedAt = now(); } }) },
-        { label: 'Mark done', onClick: () => api.update(s => { const x = s.tasks.find(y => y.id === t.id); if (x) { x.status = 'done'; x.updatedAt = now(); } }) },
-        { label: 'Reopen', onClick: () => api.update(s => { const x = s.tasks.find(y => y.id === t.id); if (x) { x.status = 'pending'; x.updatedAt = now(); } }) },
-        { sep: true },
-        { label: 'Delete', danger: true, onClick: () => api.update(s => { s.tasks = s.tasks.filter(y => y.id !== t.id); }) }
-      ]));
-      list.appendChild(row);
-    }
-  };
-  root.querySelector('#kAdd').onkeydown = (e) => {
-    if (e.key !== 'Enter') return;
-    const title = root.querySelector('#kAdd').value.trim();
-    if (!title) return;
-    try {
-      runTodo(state, { action: 'add', title }, {});
-      api.update(() => {});
-    } catch (err) { toast(String(err.message || err), 'err'); }
-    root.querySelector('#kAdd').value = '';
-  };
-  root.querySelector('#kClear').onclick = () => {
-    api.update(s => { s.tasks = (s.tasks || []).filter(t => t.status !== 'done'); });
-  };
-  paint();
-}
+/* There is deliberately no Tasks page. The agent's list belongs to the chat
+ * it was written for, and tasks.js renders it there; a separate board only
+ * pulled the plan out of its context, so it was removed again. */

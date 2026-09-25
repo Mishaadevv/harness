@@ -3,7 +3,8 @@
 import { uid, now, esc, el, openModal, openMenu, closeMenu, toast, humanError, download, debounce, fmtTokens } from './utils.js';
 import { store, activeProject } from './store.js';
 import { providerById, allModels, modelRefOf, resolveModelRef, streamChat, guessCaps, providerSnapshot } from './providers.js';
-import { enabledOpenAITools, executeTool, toolCapabilityLine, sanitizeJsonSchema } from './tools.js';
+import { enabledOpenAITools, executeTool, toolCapabilityLine, sanitizeJsonSchema, questionHistoryBlock, looksLikePlainTextQuestion, PLAIN_QUESTION_NUDGE, TODO_NUDGE } from './tools.js';
+import { refreshTodoLists, discardUnfinishedTasks } from './tasks.js';
 import { relevantMemories, memorySystemBlock, addMemory } from './memory.js';
 import { runAgent, getWebConfig } from './agent.js';
 import { contextUsage, knownContextFor, estimateTokens } from './context.js';
@@ -20,6 +21,9 @@ const runs = new Map();               // chatId -> live run (parallel chats supp
 const chatQueues = new Map();         // chatId -> [queued user texts]
 let renderQueued = false;
 let openDrawerKind = null;
+// Should the transcript follow the text as it streams? Cleared the moment the
+// reader scrolls up, set again when they come back to the bottom.
+let stickBottom = true;
 
 const api = {
   get streaming() { return streaming; },
@@ -39,7 +43,7 @@ const api = {
   setMode(m) { setMode(m); },
   setModeAndFill(m, t) { setMode(m); store.update(s => { s.view = 'chat'; }); api.fillComposer(t); },
   fillComposer(t) { $('#composerInput').value = t; autosize(); $('#composerInput').focus(); },
-  openChat(id) { store.update(s => { s.activeChatId = id; s.activeProjectId = s.chats.find(c => c.id === id)?.projectId || s.activeProjectId; s.view = 'chat'; }); bindVisibleRun(); renderAll(); },
+  openChat(id) { store.update(s => { s.activeChatId = id; s.activeProjectId = s.chats.find(c => c.id === id)?.projectId || s.activeProjectId; s.view = 'chat'; }); stickBottom = true; bindVisibleRun(); renderAll(); },
   renameChat(id) { renameChat(id); },
   moveChat(id) { moveChat(id); },
   duplicateChat(id) { duplicateChat(id); },
@@ -110,6 +114,7 @@ const api = {
   onRegenerate: regenerate,
   onContinue: continueFrom,
   onBranch: branchFrom,
+  answerQuestion: (id, value) => settleQuestion(id, value),
   ensureContextFits
 };
 
@@ -206,15 +211,21 @@ function bindShell() {
     if (e.key === 'Escape' && streaming) stopGeneration();
   });
   wireChatToggles();
-  $('#btnSend').onclick = () => (streaming ? stopGeneration() : sendCurrent());
+  $('#btnSend').onclick = () => (streaming && !awaitingAnswer() ? stopGeneration() : sendCurrent());
   $('#pillModel').onclick = openModelPicker;
   $('#pillAgent').onclick = agentMenu;
   $('#btnAttach').onclick = plusMenu;
-  $('#toBottom').onclick = () => $('#contentScroll').scrollTo({ top: $('#contentScroll').scrollHeight, behavior: 'smooth' });
+  $('#toBottom').onclick = () => { stickBottom = true; $('#contentScroll').scrollTo({ top: $('#contentScroll').scrollHeight, behavior: 'smooth' }); };
   $('#contentScroll').addEventListener('scroll', () => {
     const sc = $('#contentScroll');
-    const nearBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 220;
-    $('#toBottom').classList.toggle('show', !nearBottom && store.state.view === 'chat');
+    const gap = sc.scrollHeight - sc.scrollTop - sc.clientHeight;
+    // While an answer is streaming the reader is in charge: the moment they
+    // scroll up, the page stops following the text. Before this, every
+    // painted frame yanked them back to the bottom until the run finished.
+    if (!streaming) stickBottom = true;
+    else if (gap > 90) stickBottom = false;
+    else if (gap < 24) stickBottom = true;
+    $('#toBottom').classList.toggle('show', gap > 220 && store.state.view === 'chat');
   }, { passive: true });
   const comp = $('#composer');
   ['dragenter', 'dragover'].forEach(ev => comp.addEventListener(ev, (e) => { e.preventDefault(); comp.classList.add('drag'); $('#dropHint').hidden = false; }));
@@ -338,10 +349,10 @@ function refreshCounts() {
   const s = store.state;
   $('#dotMcp')?.classList.toggle('on', s.mcpServers.some(m => m.enabled && m.status === 'online'));
 }
-/* Live repaint of the in-chat todo list (no chat re-render needed). */
+/* Live repaint of the in-chat task list (no full chat re-render needed).
+ * tasks.js owns which lists exist; this only asks for a repaint. */
 function refreshChatTodo() {
-  const node = document.querySelector('#view-chat .todo-live');
-  if (node) paintTodoList(node);
+  refreshTodoLists();
 }
 /* Context-usage ring in the composer: % of the model's context in use. */
 function updateCtxRing() {
@@ -376,6 +387,8 @@ function syncComposer() {
   $('#modelLiveDot').style.display = found && found.provider.enabled ? '' : 'none';
   const ag = s.agents.find(a => a.id === (chat?.agentId || s.activeAgentId)) || s.agents[0];
   $('#pillAgentLabel').textContent = ag?.name || 'Agent';
+  // An open agent question makes the composer the answer field.
+  $('#composerInput').placeholder = (chat && openQuestions(chat.id).length) ? 'Type your answer…' : 'Ask anything…';
   const tState = (k) => !!(chat ? chat[k] : s.composer[k]);
   $('#tglTools').classList.toggle('on', tState('toolsOn'));
   $('#tglMcp').classList.toggle('on', tState('mcpOn'));
@@ -390,14 +403,22 @@ function syncComposer() {
   }
   updateSendBtn();
 }
+/* True while an ask_user question of the visible chat is still open: the
+ * composer then sends the answer instead of stopping the run. */
+function awaitingAnswer() {
+  const chat = store.activeChat;
+  return !!(chat && openQuestions(chat.id).length);
+}
 function updateSendBtn() {
   const btn = $('#btnSend');
-  btn.classList.toggle('stop', !!streaming);
-  if (!streaming) btn.classList.toggle('ready', !!$('#composerInput').value.trim() || attachments.length > 0);
+  const answering = awaitingAnswer();
+  const stopMode = !!streaming && !answering;
+  btn.classList.toggle('stop', stopMode);
+  if (!stopMode) btn.classList.toggle('ready', !!$('#composerInput').value.trim() || attachments.length > 0);
   else btn.classList.remove('ready');
-  $('#sendIcon').style.display = streaming ? 'none' : '';
-  $('#stopIcon').style.display = streaming ? '' : 'none';
-  btn.title = streaming ? 'Stop' : 'Send';
+  $('#sendIcon').style.display = stopMode ? 'none' : '';
+  $('#stopIcon').style.display = stopMode ? '' : 'none';
+  btn.title = stopMode ? 'Stop' : 'Send';
   refreshComposerGlow();
 }
 function refreshComposerGlow() {
@@ -409,8 +430,7 @@ function refreshComposerGlow() {
 function scrollBottom(smooth = true) {
   requestAnimationFrame(() => {
     const sc = $('#contentScroll');
-    // while streaming, don't yank the user away from history they are reading
-    if (streaming && sc.scrollHeight - sc.scrollTop - sc.clientHeight > 220) return;
+    if (streaming && !stickBottom) return; // the reader scrolled away: leave them there
     sc.scrollTo({ top: sc.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
   });
 }
@@ -731,6 +751,67 @@ async function attachProjectFile(projectId, fileRel) {
 }
 
 /* ================= SEND PIPELINE ================= */
+
+/* ---- Agent questions (the ask_user tool) ----
+ * The model pauses the run and asks the user something. The question is
+ * rendered as a card INSIDE the chat (view-chat.js questionNode); the
+ * answer — a clicked option or text typed in the card / composer —
+ * resolves the promise the tool is awaiting, and the run continues with
+ * it. Questions live on the run (run.questions) so they keep their place
+ * in the timeline, and are saved onto the assistant message afterwards. */
+const pendingQuestions = new Map(); // question id -> {q, resolve}
+
+function openQuestions(chatId) {
+  return [...pendingQuestions.values()].filter(e => e.q.chatId === chatId && e.q.status === 'open');
+}
+
+function settleQuestion(id, value) {
+  const entry = pendingQuestions.get(id);
+  if (!entry) return false;
+  pendingQuestions.delete(id);
+  const q = entry.q;
+  const isCancel = value === null || value === undefined || (Array.isArray(value) && !value.length);
+  q.answer = isCancel ? null : (Array.isArray(value) ? value.map(v => String(v)) : String(value));
+  q.status = isCancel ? 'skipped' : 'answered';
+  q.answeredAt = now();
+  entry.resolve(isCancel ? null : (Array.isArray(q.answer) ? q.answer.join(', ') : q.answer));
+  queueRerenderChat();
+  updateSendBtn();
+  return true;
+}
+
+function askUser({ chatId, question, options, header, multiple, run, signal }) {
+  const q = {
+    id: uid('q'), chatId,
+    question: String(question || '').slice(0, 2000),
+    options: (Array.isArray(options) ? options : []).map(o => String(o).trim().slice(0, 300)).filter(Boolean).slice(0, 6),
+    header: header ? String(header).slice(0, 60) : null,
+    multiple: !!multiple,
+    status: 'open', answer: null, at: now()
+  };
+  let resolve;
+  const promise = new Promise(r => { resolve = r; });
+  pendingQuestions.set(q.id, { q, resolve });
+  if (run) {
+    (run.questions = run.questions || []).push(q);
+    run.status = 'Waiting for your answer…';
+    scheduleRunPaint(run);
+  }
+  // A stopped run must never leave the model waiting for an answer that
+  // can no longer arrive: aborts settle the question as skipped.
+  if (signal) {
+    if (signal.aborted) settleQuestion(q.id, null);
+    else signal.addEventListener('abort', () => settleQuestion(q.id, null), { once: true });
+  }
+  if (chatId !== store.state.activeChatId) {
+    const ch = store.state.chats.find(c => c.id === chatId);
+    toast(`The agent is asking “${(ch?.title || 'another chat').slice(0, 40)}” a question`, 'info', 4200);
+  } else if (store.state.view === 'chat') {
+    scrollBottom(false);
+  }
+  return promise;
+}
+
 /* Dangerous tools (shell) always ask first — unless auto-approve is on
  * in Agent mode. Denials are reported back to the model. */
 async function confirmToolUse(name, args) {
@@ -744,6 +825,26 @@ async function confirmToolUse(name, args) {
   });
   return !!ok;
 }
+/* What to say in the chat when a run died before writing any answer.
+ * The steps above are kept, the reason is named, and the task list stops
+ * pretending to be in progress — silence here was the worst outcome. */
+function failureReport(run, dropped) {
+  const err = run.error || '';
+  const why = run.status === 'Stopped'
+    ? 'The run was stopped before it wrote an answer.'
+    : `**The run stopped: ${err || 'the model call failed'}**`;
+  const hints = [];
+  if (/429|quota|rate ?limit|resource_exhausted/i.test(err)) hints.push('The provider is rate-limiting or out of quota for this key: retry in a moment, switch model, or check your plan and billing.');
+  else if (/401|403|api key|unauthor|permission|forbidden/i.test(err)) hints.push('The provider rejected the key — check it in Settings → Providers.');
+  else if (/context|token|too long|maximum/i.test(err)) hints.push('The conversation may not fit this model’s context window — pick a model with more context, or let the agent compact it.');
+  else if (/network|fetch|timeout|econn|socket|ssl/i.test(err)) hints.push('That looks like a connection problem between here and the provider.');
+  const steps = (run.steps || []).length;
+  if (steps) hints.push(`${steps} tool step${steps === 1 ? '' : 's'} above ${steps === 1 ? 'is' : 'are'} kept — nothing was undone.`);
+  if (dropped) hints.push(`The plan for this run was dropped with it: ${dropped} unfinished step${dropped === 1 ? '' : 's'} — a stranded list is not a plan.`);
+  hints.push('Use **Retry** on this message to run it again. The task list belongs to the agent — you never have to tick anything yourself.');
+  return `${why}\n\n` + hints.map(h => `- ${h}`).join('\n');
+}
+
 function projectBase(projectId) {
   const p = store.state.projects.find(x => x.id === (projectId || store.state.activeProjectId));
   return p?.localPath || null;
@@ -768,6 +869,18 @@ function resolveActiveModel() {
   return r ? { ...r, ref } : null;
 }
 async function sendCurrent(prefill) {
+  // While the agent waits on an ask_user question the composer is the
+  // answer field: what you type goes back to the waiting tool call.
+  const active = store.activeChat;
+  const waiting = active ? openQuestions(active.id) : [];
+  if (waiting.length) {
+    const answerText = (prefill ?? $('#composerInput').value).trim();
+    if (!answerText) return;
+    $('#composerInput').value = '';
+    autosize(); syncComposer(); updateSendBtn();
+    settleQuestion(waiting[0].q.id, answerText);
+    return;
+  }
   const text = (prefill ?? $('#composerInput').value).trim();
   if (!text && !attachments.length) return;
   // The composer is attached to the visible chat; a run there is still ours to feed —
@@ -804,6 +917,7 @@ async function buildMessages(chat, extraSystem = '') {
   const sys = [
     'You are Zeqou, a precise senior engineering assistant inside Zeqou Harness. Be helpful, concise and honest. Format with Markdown when it helps.',
     toolCapabilityLine(s, chat),
+    questionHistoryBlock(chat.messages),
     proj?.systemInstructions ? `Project instructions:\n${proj.systemInstructions}` : '',
     mems.length ? memorySystemBlock(mems) : '',
     extraSystem
@@ -876,11 +990,12 @@ async function generate(chatId, attempt = 1) {
   const abortCtrl = new AbortController();
   const modelLabel = mdl.model.label || mdl.model.modelId;
   const run = {
-    chatId, modelLabel, text: '', reasoning: '', toolCards: [], steps: [],
+    chatId, modelLabel, text: '', reasoning: '', toolCards: [], steps: [], error: '',
     status: (chat.mode || store.state.mode) === 'agent' ? 'Agent starting…' : 'Contacting model…',
     startedAt: Date.now(), abortCtrl
   };
   runs.set(chatId, run);
+  stickBottom = true; // a new run follows its own text until the reader scrolls away
   bindVisibleRun();
   queueRerenderChat(); updateSendBtn();
   try {
@@ -898,14 +1013,27 @@ async function generate(chatId, attempt = 1) {
         return generate(chatId, 2);
       }
       run.status = 'Failed';
-      toast(humanError(e), 'err', 5000);
+      run.error = humanError(e);
+      toast(run.error, 'err', 5000);
     }
   } finally {
+    // Nothing may hold a promise forever: leftover questions (stopped run,
+    // deleted chat) are settled as skipped before the answer is saved.
+    for (const e of [...pendingQuestions.values()]) {
+      if (e.q.chatId === chatId) settleQuestion(e.q.id, null);
+    }
     const q = chatQueues.get(chatId) || [];
     const failed = run.status === 'Failed' || run.status === 'Stopped';
     // Keep whatever the model managed to stream before a failure or a stop —
     // losing half a good answer hurts more than an imperfect one.
     const partialText = failed ? (run.text || '').trim() : '';
+    // A run can die without a single character of text (the provider refused
+    // the next call after a few tool steps). Silence here is unreadable: the
+    // chat looked finished, the task list looked abandoned, and the only
+    // thing left to click was the tasks. So a failed run always says what
+    // happened — and takes its unfinished plan with it, because a list of
+    // untouched steps nobody is working on is not a plan any more.
+    const dropped = failed ? discardUnfinishedTasks(store.state, chatId) : 0;
     const partialMeta = {
       reasoning: run.reasoning || '', steps: run.steps || [],
       toolCalls: (run.toolCards || []).map(t => ({ name: t.name, args: t.args, ok: t.ok, result: t.result, ms: t.ms }))
@@ -914,11 +1042,15 @@ async function generate(chatId, attempt = 1) {
     // may already be registered — deleting it would orphan the live stream.
     if (runs.get(chatId) === run) runs.delete(chatId);
     bindVisibleRun();
-    if (partialText) {
+    if (failed) {
       const note = run.status === 'Stopped'
-        ? '\n\n_(stopped — answer may be incomplete)_'
-        : '\n\n_(generation failed — partial answer kept)_';
-      saveAssistant(chatId, { content: partialText + note, ...partialMeta, mems: [], modelLabel: run.modelLabel, partial: true });
+        ? '_(stopped — answer may be incomplete)_'
+        : '_(generation failed — partial answer kept)_';
+      const droppedNote = dropped ? `\n\n_The plan for this run was dropped with it: ${dropped} unfinished step${dropped === 1 ? '' : 's'}. Send “continue” and the agent writes a fresh plan._` : '';
+      const content = partialText
+        ? `${partialText}\n\n${note}${droppedNote}`
+        : failureReport(run, dropped);
+      saveAssistant(chatId, { content, ...partialMeta, mems: [], modelLabel: run.modelLabel, partial: true, failed: true, questions: run.questions });
     }
     store.saveNow();
     renderAll();
@@ -1056,12 +1188,25 @@ async function generateChat(chat, mdl, run) {
   let { messages, mems } = buildMessages(chat);
   let rounds = 0, finalText = '', finalReasoning = '';
   const toolHistory = [];
+  // Same two safety nets as Agent mode: a question written as text is not an
+  // answer, and tool work without a task list hides the plan from the user.
+  const usedTools = new Set();
+  let nudgedAsk = false, nudgedTodo = false;
+  const nudge = (text) => { messages[0] = { role: 'system', content: `${messages[0].content}\n\n${text}` }; };
   while (rounds < 4) {
     rounds++;
     run.status = rounds > 1 ? `Step ${rounds}` : 'Generating…';
     const acc = await streamOnce(mdl, messages, allTools, run);
     finalText = acc.text; finalReasoning = acc.reasoning;
-    if (!acc.toolCalls.length) break;
+    if (!acc.toolCalls.length) {
+      if (!nudgedAsk && !usedTools.has('ask_user') && looksLikePlainTextQuestion(finalText)) {
+        nudgedAsk = true;
+        nudge(PLAIN_QUESTION_NUDGE);
+        run.status = 'Sending the question back through ask_user…';
+        continue;
+      }
+      break;
+    }
     const toolCallsResp = acc.toolCalls;
     messages.push({ role: 'assistant', content: acc.text || null, tool_calls: toolCallsResp.map(c => ({ id: c.id || uid('call'), type: 'function', function: { name: c.function.name, arguments: c.function.arguments || '{}' } })) });
     for (const c of toolCallsResp) {
@@ -1072,9 +1217,10 @@ async function generateChat(chat, mdl, run) {
       if (!(await confirmToolUse(c.function.name, args))) {
         rec = { id: uid('tc'), tool: c.function.name, args, ok: false, result: 'Denied by user.', at: now(), chatId: chat.id, ms: 0 };
       } else {
-        rec = await executeTool(store.state, c.function.name, args, { projectId: chat.projectId, base: projectBase(chat.projectId), chatId: chat.id, webConfig: getWebConfig(), compact: (o = {}) => compactChat(chat, mdl, run, o), onTaskChange: () => refreshChatTodo() });
+        rec = await executeTool(store.state, c.function.name, args, { projectId: chat.projectId, base: projectBase(chat.projectId), chatId: chat.id, webConfig: getWebConfig(), compact: (o = {}) => compactChat(chat, mdl, run, o), onTaskChange: () => refreshChatTodo(), ask: (a) => askUser({ ...a, chatId: chat.id, run, signal: run.abortCtrl.signal }) });
       }
       store.update(st => { st.toolCalls.unshift(rec); }, true);
+      usedTools.add(c.function.name);
       toolHistory.push({ name: c.function.name, args, ok: rec.ok, result: rec.result, ms: rec.ms });
       upsertToolCard(run, c.function.name, args, rec.result, rec.ok, rec.ms);
       if (c.function.name === 'compact_context') {
@@ -1083,8 +1229,13 @@ async function generateChat(chat, mdl, run) {
         messages.push({ role: 'tool', tool_call_id: c.id || 'call', content: String(rec.result).slice(0, 8000) });
       }
     }
+    if (!nudgedTodo && !usedTools.has('todo') && allTools.length) {
+      nudgedTodo = true;
+      nudge(TODO_NUDGE);
+      run.status = 'Asking for a task list…';
+    }
   }
-  saveAssistant(chat.id, { content: finalText || '(empty response)', reasoning: finalReasoning, toolCalls: toolHistory, mems, modelLabel: run.modelLabel });
+  saveAssistant(chat.id, { content: finalText || '(empty response)', reasoning: finalReasoning, toolCalls: toolHistory, mems, modelLabel: run.modelLabel, questions: run.questions });
 }
 function collectMcpTools(s, chat) {
   if (chat && chat.mcpOn === false) return [];
@@ -1140,6 +1291,7 @@ async function generateAgent(chat, mdl, run) {
     compact: (o = {}) => compactChat(chat, mdl, run, o),
     save: (rec) => store.update(st => { st.toolCalls.unshift(rec); }, true),
     confirmTool: (n, a) => confirmToolUse(n, a),
+    ask: (a) => askUser({ ...a, chatId: chat.id, run, signal: run.abortCtrl.signal }),
     onEvent: (ev) => {
       if (ev.kind === 'token') { run.text = (run.text || '') + ev.text; run.status = `Step ${ev.n} · writing…`; }
       else if (ev.kind === 'reasoning') { run.reasoning = (run.reasoning || '') + ev.text; }
@@ -1147,6 +1299,7 @@ async function generateAgent(chat, mdl, run) {
       else if (ev.kind === 'step') { run.status = `Step ${ev.n}/${ev.of}…`; }
       else if (ev.kind === 'tool') { (run.toolCards = run.toolCards || []).push({ name: ev.name, args: ev.args, result: 'Running…', ok: null }); run.status = `Step ${ev.n} · ${ev.name}…`; }
       else if (ev.kind === 'task-status') { run.status = `Working on: ${ev.title}`; }
+      else if (ev.kind === 'nudge') { run.status = ev.what === 'todo' ? 'Asking for a task list…' : 'Sending the question back through ask_user…'; }
       else if (ev.kind === 'result') {
         const c = (run.toolCards || []).find(t => t.name === ev.name && t.ok == null);
         if (c) { c.result = ev.result; c.ok = ev.ok; c.ms = ev.ms; }
@@ -1161,9 +1314,18 @@ async function generateAgent(chat, mdl, run) {
       scheduleRunPaint(run);
     }
   });
-  saveAssistant(chat.id, { content: res.text, reasoning: res.reasoning, steps: res.steps, toolCalls: (run.toolCards || []).map(t => ({ name: t.name, args: t.args, ok: t.ok, result: t.result, ms: t.ms })), mems: res.mems, modelLabel: run.modelLabel });
+  // Running out of steps is not a finish: the agent stopped in the middle of
+  // its plan, so the plan goes with it instead of being left in the chat for
+  // the user to stare at. Not marked as `failed` — the text below explains it.
+  let dropped = 0;
+  if (res.stopped) {
+    run.status = 'Step limit';
+    dropped = discardUnfinishedTasks(store.state, chat.id);
+  }
+  const tail = dropped ? `\n\n_The plan for this run was dropped with it: ${dropped} unfinished step${dropped === 1 ? '' : 's'}. Send “continue” and the agent writes a fresh plan._` : '';
+  saveAssistant(chat.id, { content: (res.text || '(the model finished without writing an answer — ask again or retry)') + tail, reasoning: res.reasoning, steps: res.steps, toolCalls: (run.toolCards || []).map(t => ({ name: t.name, args: t.args, ok: t.ok, result: t.result, ms: t.ms })), mems: res.mems, modelLabel: run.modelLabel, questions: run.questions });
 }
-function saveAssistant(chatId, { content, reasoning, steps, toolCalls, mems, modelLabel, partial }) {
+function saveAssistant(chatId, { content, reasoning, steps, toolCalls, mems, modelLabel, partial, failed, questions }) {
   const toks = Math.round((content || '').length / 4);
   store.update(s => {
     const c = s.chats.find(x => x.id === chatId);
@@ -1172,7 +1334,8 @@ function saveAssistant(chatId, { content, reasoning, steps, toolCalls, mems, mod
       id: uid('m'), role: 'assistant', content, reasoning: reasoning || '',
       steps: steps || [], toolCalls: toolCalls || [],
       memsUsed: (mems || []).map(m => m.text.slice(0, 90)),
-      modelLabel, at: now(), tokens: toks + ' tok', partial: !!partial
+      modelLabel, at: now(), tokens: toks + ' tok', partial: !!partial, failed: !!failed,
+      questions: (questions || []).filter(q => q && q.question)
     });
     c.updatedAt = now();
   });

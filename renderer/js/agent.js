@@ -4,11 +4,11 @@
  */
 import { uid, now } from './utils.js';
 import { streamChat } from './providers.js';
-import { enabledOpenAITools, executeTool, toolCapabilityLine } from './tools.js';
+import { enabledOpenAITools, executeTool, toolCapabilityLine, questionHistoryBlock, looksLikePlainTextQuestion, PLAIN_QUESTION_NUDGE, TODO_NUDGE } from './tools.js';
 import { relevantMemories, memorySystemBlock } from './memory.js';
 
-export async function runAgent({ state, chat, provider, model, userText, attachments, onEvent, signal, save, confirmTool, compact }) {
-  // onEvent({kind:'thinking'|'tool'|'result'|'step'|'token'|'reasoning'|'tool_delta'|'done'|'error', ...})
+export async function runAgent({ state, chat, provider, model, userText, attachments, onEvent, signal, save, confirmTool, compact, ask }) {
+  // onEvent({kind:'thinking'|'tool'|'result'|'step'|'token'|'reasoning'|'tool_delta'|'ask'|'done'|'error', ...})
   const agent = state.agents.find(a => a.id === (chat.agentId || state.activeAgentId)) || state.agents[0];
   const maxSteps = Math.min(12, Math.max(1, agent.maxSteps || state.settings.agentMaxSteps || 6));
   const mems = relevantMemories(state, chat, userText);
@@ -19,13 +19,21 @@ export async function runAgent({ state, chat, provider, model, userText, attachm
     project?.systemInstructions ? `Project instructions:\n${project.systemInstructions}` : '',
     agent.instructions ? `Agent role (${agent.name}): ${agent.instructions}` : '',
     toolCapabilityLine(state, chat),
+    questionHistoryBlock(chat.messages),
     mems.length ? memorySystemBlock(mems) : '',
     'You are running in Agent Mode. Think step by step. Use tools when they help. ' +
     'After each tool result, decide the next step. When finished, write the final response. ' +
     'Keep intermediate reasoning compact; the UI shows timeline steps. ' +
-    'For any job with several steps, keep a visible plan: create tasks with the todo tool ' +
-    '(action=add), mark a task doing when you start it and done when it is finished, ' +
-    'and add new tasks as you discover more work. The user watches this list live.'
+    'For any work you do — even a single step — keep the plan visible: create the tasks with ' +
+    'the todo tool (action=add) BEFORE you start working, mark a task doing when you start it ' +
+    'and done when it is finished, and add tasks as you discover more work. ' +
+    'The user watches this list live; work with an empty list looks like work with no plan. ' +
+    'When a decision, preference or missing detail belongs to the user, call ask_user and ' +
+    'wait for the answer — the question card appears in the chat and the user replies there. ' +
+    'You may keep working after asking, but never invent the answer. ' +
+    'You own the task list: the user never has to tick, add or reorder anything, and you must ' +
+    'not ask them to. Never stop while a task is still marked doing — either finish it, or set ' +
+    'it back to pending and say plainly what blocked you.'
   ].filter(Boolean).join('\n\n');
 
   const history = chat.messages
@@ -64,6 +72,14 @@ export async function runAgent({ state, chat, provider, model, userText, attachm
   const webConfig = readWebConfig();
   const steps = [];
   let stepNo = 0;
+  // Two things small models drop from a prompt but the user notices at once:
+  // a question written as text, and a job done without a task list.
+  const usedTools = new Set();
+  let nudgedAsk = false, nudgedTodo = false;
+  const nudge = (text, what, n) => {
+    messages[0] = { role: 'system', content: `${messages[0].content}\n\n${text}` };
+    onEvent({ kind: 'nudge', n, what });
+  };
 
   while (stepNo < maxSteps) {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -86,6 +102,13 @@ export async function runAgent({ state, chat, provider, model, userText, attachm
     if (res.aborted) throw new DOMException('Aborted', 'AbortError');
     const calls = (res.toolCalls || []).filter(c => c.function?.name);
     if (!calls.length) {
+      // Finishing with a question in plain text is not an answer — send it
+      // back through ask_user once, then accept whatever comes.
+      if (!nudgedAsk && !usedTools.has('ask_user') && looksLikePlainTextQuestion(acc)) {
+        nudgedAsk = true;
+        nudge(PLAIN_QUESTION_NUDGE, 'ask_user', stepNo);
+        continue;
+      }
       onEvent({ kind: 'final', n: stepNo, text: acc });
       return { text: acc, reasoning, steps, mems };
     }
@@ -96,12 +119,13 @@ export async function runAgent({ state, chat, provider, model, userText, attachm
       let args = {};
       try { args = JSON.parse(c.function.arguments || '{}'); } catch { args = { _raw: c.function.arguments }; }
       onEvent({ kind: 'tool', n: stepNo, name, args });
+      if (name === 'ask_user') onEvent({ kind: 'ask', n: stepNo, question: args?.question || '' });
       if (name === 'todo' && args && args.action === 'status' && args.status === 'doing' && args.id) {
         const t = (state.tasks || []).find(x => x.id === args.id || x.id === String(args.id).replace(/^#/, ''));
         if (t) onEvent({ kind: 'task-status', title: t.title });
       }
       const proj = state.projects.find(p => p.id === chat.projectId);
-      const ctx = { projectId: chat.projectId, base: proj?.localPath || null, chatId: chat.id, webConfig, compact, onTaskChange: () => onEvent({ kind: 'tasks', n: stepNo }) };
+      const ctx = { projectId: chat.projectId, base: proj?.localPath || null, chatId: chat.id, webConfig, compact, ask, onTaskChange: () => onEvent({ kind: 'tasks', n: stepNo }) };
       let rec;
       if (name === 'compact_context' && compact) {
         onEvent({ kind: 'compacting', n: stepNo });
@@ -116,11 +140,20 @@ export async function runAgent({ state, chat, provider, model, userText, attachm
       onEvent({ kind: 'result', n: stepNo, name, ok: rec.ok, result: rec.result, ms: rec.ms });
       steps.push({ n: stepNo, name, args, ok: rec.ok, result: rec.result });
       messages.push({ role: 'tool', tool_call_id: c.id || 'call', content: String(rec.result).slice(0, 8000) });
+      usedTools.add(name);
+    }
+    // Tool work happened without any plan: ask for the list once.
+    if (!nudgedTodo && !usedTools.has('todo') && tools.length) {
+      nudgedTodo = true;
+      nudge(TODO_NUDGE, 'todo', stepNo);
     }
     // loop continues; model decides next step
   }
-  onEvent({ kind: 'final', n: stepNo, text: '_Stopped after the step limit. Increase Max steps in Settings → Agent for longer runs._' });
-  return { text: '_Stopped after the step limit._', reasoning: '', steps, mems };
+  // `stopped` tells the caller this was not a finish: the run died in the
+  // middle of its plan, and the caller drops that plan.
+  const text = `_Stopped after ${maxSteps} steps — the step limit. Raise “Max steps” in Settings → Agent, or send “continue”._`;
+  onEvent({ kind: 'final', n: stepNo, text });
+  return { text, reasoning: '', steps, mems, stopped: true };
 }
 
 function readWebConfig() {

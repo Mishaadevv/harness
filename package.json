@@ -1,6 +1,6 @@
 {
   "name": "zeqou-harness",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "description": "Zeqou Harness — premium desktop workspace for AI models and agents",
   "main": "main.js",
   "author": "Zeqou <misakolot6@gmail.com>",

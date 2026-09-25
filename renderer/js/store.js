@@ -10,7 +10,7 @@ const LS_KEY = 'zeqou-harness-state-v1';
 
 function defaultState() {
   return {
-    version: 9,
+    version: 10,
     theme: 'system',           // system | dark | light
     view: 'chat',
     mode: 'chat',              // chat | agent
@@ -23,7 +23,7 @@ function defaultState() {
     ],
     memories: [],              // {id,text,tags,projectId,createdAt,updatedAt,useCount}
     tasks: [],                 // agent todo list {id,chatId,title,plan,priority,status,createdAt,updatedAt}
-    tools: BUILTIN_TOOLS.map(t => ({ ...t, enabled: ['calculator', 'datetime', 'web_search', 'project_files', 'read_file', 'edit_file', 'search_files', 'write_file', 'compact_context', 'todo'].includes(t.id), custom: false })),
+    tools: BUILTIN_TOOLS.map(t => ({ ...t, enabled: ['calculator', 'datetime', 'web_search', 'project_files', 'read_file', 'edit_file', 'search_files', 'write_file', 'compact_context', 'todo', 'ask_user'].includes(t.id), custom: false })),
     toolCalls: [],             // history {id,tool,args,result,ok,at,chatId}
     mcpServers: [],            // {id,name,transport,url,command,args,headers,enabled,status,tools,lastLog[]}
     providers: DEFAULT_PROVIDERS,
@@ -154,6 +154,18 @@ class Store {
       const todo = this.state.tools.find(t => t.id === 'todo');
       if (todo && todo.enabled === undefined) todo.enabled = true;
       this.state.version = 9;
+      this.saveNow();
+    }
+    // 10) v10 migration: the ask_user tool — let the agent pause and ask
+    //     questions the user answers right inside the chat. On by default.
+    if (this.state.version < 10) {
+      const have = new Set(this.state.tools.map(t => t.id));
+      for (const t of BUILTIN_TOOLS) {
+        if (!have.has(t.id)) this.state.tools.push({ ...t, enabled: t.id === 'ask_user', custom: false });
+      }
+      const ask = this.state.tools.find(t => t.id === 'ask_user');
+      if (ask && ask.enabled === undefined) ask.enabled = true;
+      this.state.version = 10;
       this.saveNow();
     }
     this.emit();

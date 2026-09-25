@@ -4,6 +4,7 @@
  * every call is recorded in toolCalls history with permission gating.
  */
 import { uid, now } from './utils.js';
+import { runTodo } from './tasks.js';
 
 export const BUILTIN_TOOLS = [
   {
@@ -98,11 +99,11 @@ export const BUILTIN_TOOLS = [
   },
   {
     id: 'todo', name: 'todo',
-    description: 'Manage your own task list (a todo list the user can watch live in the chat). Actions: add - create a task (optionally with a one-line plan); update - change title/plan/priority; status - mark pending, doing or done; remove - delete; list - show the current list. Use it for any multi-step job: plan the steps first, mark a task doing when you start it and done when it is finished, so the user can follow progress.',
+    description: 'Manage your own task list (a todo list the user watches live in the chat). Actions: add - create a task (optionally with a one-line plan); update - change title/plan/priority; status - mark pending, doing or done; remove - delete one task; clear - drop every finished task; list - show the current list. Use it for any multi-step job: plan the steps first, mark a task doing when you start it and done when it is finished, so the user can follow progress.',
     parameters: {
       type: 'object',
       properties: {
-        action: { type: 'string', description: 'add | update | status | remove | list', enum: ['add', 'update', 'status', 'remove', 'list'] },
+        action: { type: 'string', description: 'add | update | status | remove | clear | list', enum: ['add', 'update', 'status', 'remove', 'clear', 'list'] },
         id: { type: 'string', description: 'Task id (returned when created; list shows ids). Required for update/status/remove.' },
         title: { type: 'string', description: 'Task title (add/update)' },
         plan: { type: 'string', description: 'One-line plan or note for how you will do it (add/update, optional)' },
@@ -113,6 +114,21 @@ export const BUILTIN_TOOLS = [
       required: ['action']
     },
     permissions: 'safe', timeoutMs: 3000
+  },
+  {
+    id: 'ask_user', name: 'ask_user',
+    description: 'Ask the user a question and WAIT for the answer. The question appears as a card inside the chat: the user clicks one of your options or types their own answer, and it comes back to you as the tool result. Use it whenever the decision, preference or missing detail belongs to the user — ask instead of guessing, and do not write the question as plain text (a plain question is not answerable). Ask one focused question at a time, with 2-5 concrete options when the answers are predictable.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'The question to ask. Self-contained, plain language, one sentence when possible.' },
+        options: { type: 'array', description: 'Optional 2-5 suggested answers shown as buttons the user can click.', items: { type: 'string' } },
+        header: { type: 'string', description: 'Optional short label above the question, e.g. "Scope" or "Format".' },
+        multiple: { type: 'boolean', description: 'Let the user pick several options at once (default false).' }
+      },
+      required: ['question']
+    },
+    permissions: 'safe', timeoutMs: 0
   }
 ];
 
@@ -181,7 +197,13 @@ export function toolCapabilityLine(state, chat) {
   const parts = [];
   if (fs.length) parts.push(`workspace file tools: ${fs.join(', ')} — you CAN and SHOULD create/modify files directly with write_file when asked; never tell the user to save files manually`);
   if (rest.length) parts.push(`other tools: ${rest.join(', ')}`);
-  return `Available tools (call them via function calling): ${parts.join('; ')}.`;
+  const todo = names.includes('todo')
+    ? ' Keep a visible task list for any real work: before you start, write the steps down with todo (action=add) — one task per step, even for a short job — then mark a task doing when you start it and done when it is finished, and add steps you discover on the way. The user watches this list live, and an empty list while you work reads as work you never planned.'
+    : '';
+  const ask = names.includes('ask_user')
+    ? ' When you need a decision, a preference or a missing detail from the user, call ask_user: it shows a question card in the chat and waits for the real answer. Never guess silently and never write the question only as text.'
+    : '';
+  return `Available tools (call them via function calling): ${parts.join('; ')}.${todo}${ask}`;
 }
 
 /* Real execution. ctx: {projectId, webConfig} */
@@ -204,6 +226,7 @@ export async function executeTool(state, toolName, args, ctx = {}) {
       ? ctx.compact({ instructions: args?.instructions || '' })
       : Promise.resolve('Context compaction is not available here (no active run).'));
     else if (toolName === 'todo') out = runTodo(state, args, ctx);
+    else if (toolName === 'ask_user') out = await runAskUser(args, ctx);
     else if (toolName.startsWith('mcp__')) out = await runMcpTool(state, toolName, args);
     else {
       const custom = state.tools.find(t => t.name === toolName && t.custom);
@@ -397,81 +420,88 @@ async function runCustomTool(custom, args) {
   throw new Error('Custom tool has no webhook configured');
 }
 
-/* ── todo: the agent's own task list ─────────────────────────────────────
- * State lives in store.state.tasks so the Tasks panel can render it live.
- * A hook (ctx.onTaskChange) is called after every mutation so an open run
- * view repaints immediately without waiting for the next store emit. */
-export const TASK_STATUSES = ['pending', 'doing', 'done'];
-
-function taskLine(t) {
-  const mark = t.status === 'done' ? '[x]' : t.status === 'doing' ? '[~]' : '[ ]';
-  const prio = t.priority && t.priority !== 'normal' ? ` (${t.priority})` : '';
-  const plan = t.plan ? ` — ${t.plan}` : '';
-  return `${mark} #${t.id}${prio} ${t.title}${plan}`;
+/* ── ask_user: pause the run and let the user answer in the chat ────────
+ * The UI owns the waiting: ctx.ask(...) renders the question card and
+ * resolves with the answer (string, array for multi-select, or null when
+ * the user skipped / the run was stopped). No ctx.ask means the run is not
+ * attached to a chat, which is the only case where we cannot ask. */
+async function runAskUser(args, ctx = {}) {
+  const question = String(args.question || '').trim();
+  if (!question) throw new Error('question is required for the ask_user tool');
+  if (!ctx.ask) throw new Error('Asking the user is only possible during a live chat run.');
+  const options = (Array.isArray(args.options) ? args.options : [])
+    .map(o => String(o).trim().slice(0, 300)).filter(Boolean).slice(0, 6);
+  const answer = await ctx.ask({
+    question: question.slice(0, 2000),
+    options,
+    header: args.header ? String(args.header).slice(0, 60) : null,
+    multiple: !!args.multiple
+  });
+  if (answer === null || answer === undefined || (Array.isArray(answer) && !answer.length)) {
+    return 'The user did not answer (skipped or the run was stopped). Do not ask again in a loop — continue with a sensible default and say which one you assumed, or finish and ask in plain text.';
+  }
+  return `User answered: ${Array.isArray(answer) ? answer.join(' | ') : String(answer)}`;
 }
 
-export function runTodo(state, args, ctx = {}) {
-  const action = String(args.action || 'list').toLowerCase();
-  state.tasks = Array.isArray(state.tasks) ? state.tasks : [];
-  const done = (out) => {
-    ctx.onTaskChange && ctx.onTaskChange();
-    return out;
-  };
+/* ── enforcing the two tools small models forget ────────────────────────
+ * A 7–14B model will happily write "Хочешь, чтобы я написал код?" as plain
+ * text instead of calling ask_user, and work through a job without ever
+ * touching the todo tool — a prompt is a suggestion, not a guarantee. So the
+ * harness checks the answer and, exactly once per run, states what was
+ * expected. The line is appended to the existing system message: no fake
+ * turns enter the conversation and the tool results stay intact. */
+export const PLAIN_QUESTION_NUDGE = 'Your answer asks the user something as plain text, which nobody can answer: no reply is attached to it. If you still need that information, call the ask_user tool with the question now (with its options when you have them) and stop the answer there. Write the answer again without the question if it was rhetorical or the user already answered it.';
 
-  if (action === 'add') {
-    const title = String(args.title || '').trim();
-    if (!title) throw new Error('title is required for the add action');
-    if (state.tasks.length >= 100) throw new Error('Too many tasks (limit 100) — remove finished ones first');
-    const task = {
-      id: uid('task'),
-      chatId: ctx.chatId || null,
-      title: title.slice(0, 200),
-      plan: String(args.plan || '').slice(0, 300) || null,
-      priority: ['low', 'normal', 'high'].includes(args.priority) ? args.priority : 'normal',
-      status: 'pending',
-      createdAt: now(),
-      updatedAt: now()
-    };
-    state.tasks.push(task);
-    return done(`Created task ${task.id}: ${taskLine(task)}`);
+export const TODO_NUDGE = 'You are working without a task list, so the user cannot see the plan. Create the remaining steps with the todo tool (action=add), mark the step you are working on as doing, and keep the list updated as you go.';
+
+/* Does this answer look like it is asking the user something? Fenced code is
+ * stripped first (code is full of question marks), and the verdict comes from
+ * the part of the text where an answer normally asks: a request for a reply
+ * ("Ответь, и я начну") or a question that opens a sentence and is aimed at
+ * the user. */
+export function looksLikePlainTextQuestion(text) {
+  const raw = String(text || '').trim();
+  if (!raw || raw.length > 6000) return false;
+  const prose = raw.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ');
+  // A short answer is read whole ("Ответь, и я начну!" is 29 characters —
+  // slicing a share off the front used to throw the request away). In a long
+  // one only the closing part matters: that is where a model turns to the
+  // user, while the opening is usually a summary or a quoted snippet.
+  const tail = prose.length > 400 ? prose.slice(Math.floor(prose.length * 0.4)) : prose;
+  if (/(ответь|скажи|уточни|подтверди|дай знать|let me know|tell me)/i.test(tail)) return true;
+  if (!/[?？]/.test(tail)) return false;
+  // A short text whose last character is a question mark is a question too —
+  // models end up with things like "Нужны ли другие блоки? Камень, дерево,
+  // песок?" or "Камень, дерево, песок, вода?", where no question word opens a
+  // sentence. Code is stripped above, so the mark is prose punctuation.
+  if (/[?？]$/.test(tail.trimEnd()) && tail.trimEnd().length <= 240) return true;
+  const asks = /(^|[.!?\n]\s*)(что|как|чем|где\s|когда|почему|зачем|сколько|какие|какой|какую|хоч(ешь|ете)|может|можно|нужн|надо|есть ли|do you|would you|should i|which|what|how|can you|could you|are you|is it|want me)/i;
+  // JS \b is ASCII-only, so a Cyrillic word boundary has to be spelled out —
+  // /\bвы\b/ can never match inside Russian text.
+  const addresses = /(?<![а-яё])(тебе|вам|вы|ты)(?![а-яё])|\b(your|you)\b/i;
+  return asks.test(tail) || addresses.test(tail);
+}
+
+/* ── questions the agent already asked ─────────────────────────────────
+ * The transcript keeps the answer only on the assistant message, and tool
+ * results are never part of the saved history — so without this block the
+ * model forgets the exchange and later answers "you never asked me
+ * anything" about a question the user already answered. */
+export function questionHistoryBlock(messages, limit = 6) {
+  const asked = [];
+  for (let i = (messages || []).length - 1; i >= 0 && asked.length < limit; i--) {
+    const m = messages[i];
+    if (m?.role !== 'assistant' || !Array.isArray(m.questions)) continue;
+    // Within one message, oldest first — the whole list is reversed below.
+    for (let j = m.questions.length - 1; j >= 0 && asked.length < limit; j--) asked.push(m.questions[j]);
   }
-
-  const findTask = () => {
-    const t = state.tasks.find(x => x.id === args.id || x.id === String(args.id || '').replace(/^#/, ''));
-    if (!t) throw new Error(`Task "${args.id}" not found. Call the todo tool with action=list to see current ids.`);
-    return t;
-  };
-
-  if (action === 'update') {
-    const t = findTask();
-    if (args.title !== undefined) { const v = String(args.title).trim(); if (v) t.title = v.slice(0, 200); }
-    if (args.plan !== undefined) t.plan = String(args.plan || '').slice(0, 300) || null;
-    if (args.priority !== undefined && ['low', 'normal', 'high'].includes(args.priority)) t.priority = args.priority;
-    t.updatedAt = now();
-    return done(`Updated task ${t.id}: ${taskLine(t)}`);
-  }
-
-  if (action === 'status') {
-    const t = findTask();
-    const st = String(args.status || '').toLowerCase();
-    if (!TASK_STATUSES.includes(st)) throw new Error('status must be one of: pending, doing, done');
-    t.status = st;
-    t.updatedAt = now();
-    return done(`Task ${t.id} is now ${st}: ${taskLine(t)}`);
-  }
-
-  if (action === 'remove') {
-    const idx = state.tasks.findIndex(x => x.id === args.id || x.id === String(args.id || '').replace(/^#/, ''));
-    if (idx < 0) throw new Error(`Task "${args.id}" not found. Call the todo tool with action=list to see current ids.`);
-    const [removed] = state.tasks.splice(idx, 1);
-    return done(`Removed task ${removed.id}: ${removed.title}`);
-  }
-
-  if (action === 'list') {
-    if (!state.tasks.length) return 'The task list is empty. Create tasks with action=add when you plan a multi-step job.';
-    const counts = TASK_STATUSES.map(s => `${state.tasks.filter(t => t.status === s).length} ${s}`).join(', ');
-    return `Tasks (${counts}):\n` + state.tasks.map(taskLine).join('\n');
-  }
-
-  throw new Error('Unknown action — use add, update, status, remove or list');
+  const lines = asked.filter(q => q && q.question).reverse().map(q => {
+    const answer = q.status === 'answered'
+      ? (Array.isArray(q.answer) ? q.answer.join(', ') : String(q.answer ?? ''))
+      : '(the user did not answer)'; 
+    return `- “${String(q.question).slice(0, 240)}” → ${answer}`;
+  });
+  if (!lines.length) return '';
+  return 'Questions you have already asked this user in this conversation — never ask the same thing again, '
+    + 'and treat these answers as facts you know:\n' + lines.join('\n');
 }
